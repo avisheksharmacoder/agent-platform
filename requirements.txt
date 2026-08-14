@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+lorealdb
+openai
+pydantic-ai[all]
+pydantic
+python-dotenv
