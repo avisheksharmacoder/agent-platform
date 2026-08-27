@@ -5,3 +5,5 @@ openai
 pydantic-ai[all]
 pydantic
 python-dotenv
+ollama
+qdrant-client
