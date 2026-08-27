@@ -1,7 +1,9 @@
-from pydantic import BaseModel, Field
+from urllib3.exceptions import TimeoutStateError
+from pydantic import BaseModel, Field, computed_field
 from enum import Enum
 from datetime import datetime
 from uuid import uuid4, UUID
+from typing import Literal, Annotated, Union
 
 
 # Enums.
@@ -40,12 +42,14 @@ class Role(str, Enum):
 # Base user model.
 class User(BaseModel):
     name: str = Field(max_length=100, description="Name of the user.")
+    user_email: str = Field(max_length=100, description="Email of the user.")
+    user_password: str = Field(max_length=100, description="Password of the user.")
     designation: str = Field(max_length=50, description="Designation of the user.")
     human_agent: bool = Field(
         description="Whether the user is a human support agent or not"
     )
     tokens_budget: int = Field(
-        ge=0, le=1000000, description="Tokens budget for the user."
+        ge=0, le=50000000, description="Tokens budget for the user."
     )
     role: Role = Field(default=Role.USER, description="Role of the user.")
 
@@ -55,11 +59,19 @@ class UserCreate(User):
     pass
 
 
+# User model for login.
+class UserLogin(BaseModel):
+    user_email: str = Field(max_length=100, description="Email of the user.")
+    user_password: str = Field(max_length=100, description="Password of the user.")
+
+
 # User model for updating.
 class UserUpdate(BaseModel):
     name: str | None = Field(
         default=None, max_length=100, description="Name of the user."
     )
+    user_email: str | None = Field(max_length=100, description="Email of the user.")
+    user_password: str | None = Field(max_length=100, description="Password of the user.")
     designation: str | None = Field(
         default=None, max_length=50, description="Designation of the user."
     )
@@ -171,3 +183,120 @@ class QueueItem(BaseModel):
     status: QueueStatus = Field(
         default=QueueStatus.PENDING, description="Status of the queue event."
     )
+
+
+# ------------------------------- RAG and AI CHAT MODELS ---------------------------
+# role of the attendant. 
+# we use a Role Enum so that in future, we can assign more roles to either 
+# AI or users, based on their positions. 
+class Role(str, Enum):
+    USER = "user"
+    AI = "ai"
+
+# quality of the response 
+class Quality(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    EXCELLENT = "excellent"
+
+
+# RAG document source and content models.
+# This model is sent to the embedding router to create the embeddings. 
+# Here the content is only the problem description (title + description)
+# The resolution is not included in the embedding text because vector similarity searches are triggered 
+# by user-provided details (which only consist of title and description) when trying to resolve future tickets.
+# The resolution field is explicitly excluded from the embedding text because vector similarity searches are triggered by user-provided details (which only consist of title and description) when trying to resolve future tickets.
+# Thus, the string passed to the embedding model for indexing should be formatted as: `Title: {title}\nDescription: {description}`.
+class RAGDocumentEmbeddingIn(BaseModel):
+    content: str = Field(description="the string for finding vector searches")
+    content_embedding: list[float] = Field(description="Embedding of the string content from embedding model")
+
+
+# create a rag document record in the vector db. 
+class RAGDocumentCreate(BaseModel):
+    doc_id: str = Field(description="ID of the document")
+    doc_title: str = Field(description="Title of the document")
+    doc_content: str = Field(description="Content of the document")
+    doc_embedding: list[float] = Field(description="Embedding of the document")
+
+
+# retrieve records from the vector db to send to the model API. 
+class RAGDocumentSource(BaseModel):
+    doc_id: str = Field(description="ID of the document")
+    doc_title: str = Field(description="Title of the document")
+    doc_content: str = Field(description="Content of the document")
+    doc_embedding: list[float] | None = Field(default=None, description="Embedding vector of the document")
+
+
+# wrap the rag documents in a list of top-k relevant documents.
+class RAGDocumentSourceOut(BaseModel):
+    documents: list[RAGDocumentSource] = Field(description="list of documents")
+    
+
+# User chat message model. 
+class UserChatMessage(BaseModel):
+    role: Role = Field(default=Role.USER ,description="role of the party who sent the message")
+    content: str = Field(description="content of the message")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    tokens: int = Field(default=0, description="tokens in the message")
+
+
+# AI agent message model. 
+class AIChatMessage(BaseModel):
+    role: Role = Field(default=Role.AI, description="role of the party who sent the message")
+    content: str = Field(description="content of the message")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    tokens: int = Field(default=0, description="tokens in the message")
+    quality: Quality | None = Field(default=None, description="quality of the response")
+    sources: RAGDocumentSourceOut | None = Field(default=None, description="documents fetched from rag db")
+    response_summary: str | None = Field(default="", description="summary of the response for context window slimming")
+
+# Models for Chatbot and user interactions. 
+# we use 2 models for 2 different response design. 
+# if the user calls for a ticket, we return AIUserChatTicketEscalation else
+# we return the normal AIUserChatResponse. 
+class AgentResponse(BaseModel):
+    action: Literal["respond"] = "respond"
+    reasoning_trace: str = Field(description="Step-by-step reasoning on why to respond normally.")
+    message: AIChatMessage
+
+class AgentEscalate(BaseModel):
+    action: Literal["escalate"] = "escalate"
+    reasoning_trace: str = Field(description="Step-by-step reasoning on why to escalate and create a ticket.")
+    title: str = Field(max_length=100, description="Title of the ticket")
+    description: str = Field(max_length=1000, description="Description of the ticket")
+    priority: Priority = Field(description="Priority of the ticket")
+    tags: list[str] | None = Field(default=None, description="Tags of the ticket")
+    sources: RAGDocumentSourceOut | None = Field(default=None, description="documents fetched from rag db")
+
+# Pydantic uses the correct model from the response returned. 
+AIChatFinalResponse = Annotated[
+    Union[AgentResponse, AgentEscalate],
+    Field(discriminator="action"),
+]
+
+# user chat session model. 
+class UserAIChatSession(BaseModel):
+    session_id: str = Field(description="unique id of the chat session")
+    user_id: str = Field(description="id of the user who is chatting with AI")
+    name: str = Field(description="Name of the chat session")
+    model_name: str = Field(description="")
+    created_at: datetime = Field(default_factory=datetime.now)
+    modified_at: datetime = Field(default_factory=datetime.now)
+    messages: list[UserChatMessage | AIChatMessage] = Field(default_factory=list,description="User and AI chat messages")
+    total_tokens: int = Field(default=0, description="tokens in the chat session")
+    ai_response_quality: Quality | None = Field(default=None, description="overall quality of the AI responses")
+    ai_response_summary: str | None = Field(default=None, description="overall summary of the AI responses")    
+
+
+# user chat session update model. 
+class UserAIChatSessionUpdate(BaseModel):   
+    name: str | None = Field(default=None, description="Name of the chat session")
+    messages: list[UserChatMessage | AIChatMessage] | None = Field(default=None, description="User and AI chat messages")
+    total_tokens: int | None = Field(default=None, description="tokens in the chat session")
+    ai_response_quality: Quality | None = Field(default=None, description="overall quality of the AI responses")
+    ai_response_summary: str | None = Field(default=None, description="overall summary of the AI responses")
+    modified_at: datetime | None = Field(default=None)
+
+
