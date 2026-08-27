@@ -9,6 +9,10 @@ from src.v1.nemotron_router import nemotron_router
 from src.v1.queue_router import queue_router
 from src.v1.agent_state_router import agent_state_router
 from src.v1.admin_router import admin_router
+from src.v1.embedding_router import embedding_router
+from src.v1.rag_database import QdrantRAGDatabase
+from src.v1.rag_router import rag_router
+from src.v1.chats_router import chats_router
 import asyncio
 import time
 from fastapi import Request
@@ -25,6 +29,10 @@ async def lifespan(app: FastAPI):
 
     # create the database for storing records.
     app.state.db = AsyncDBEngine("database/database.redb")
+
+    # Connect to Qdrant for RAG operations
+    app.state.vector_db = QdrantRAGDatabase()
+    app.state.vector_db.create_schema()
 
     # Start the background workers
     app.state.ai_worker_task = asyncio.create_task(
@@ -80,6 +88,7 @@ async def lifespan(app: FastAPI):
 
     app.state.queue.close_engine()
     app.state.db.close_engine()
+    app.state.vector_db.close()
     print("app closed!")
 
 
@@ -125,6 +134,9 @@ app.include_router(nemotron_router, prefix="/api/v1")
 app.include_router(queue_router, prefix="/api/v1")
 app.include_router(agent_state_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(embedding_router, prefix="/api/v1")
+app.include_router(rag_router, prefix="/api/v1")
+app.include_router(chats_router, prefix="/api/v1")
 
 if __name__ == "__main__":
     import uvicorn
