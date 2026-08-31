@@ -4,6 +4,8 @@ Tense is a full-stack ticketing and analytics platform with **AI-driven ticket t
 
 The project is designed around separating user-facing request handling from longer-running AI and analytical workloads, allowing the API layer to remain responsive while background workers process asynchronous tasks.
 
+[Frontend-repo](https://github.com/avisheksharmacoder/agent-platform-frontend)
+
 ## Project Status
 
 | Feature                           | Status                   |
