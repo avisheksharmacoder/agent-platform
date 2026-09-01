@@ -4,6 +4,8 @@ Tense is a full-stack ticketing and analytics platform with **AI-driven ticket t
 
 The project is designed around separating user-facing request handling from longer-running AI and analytical workloads, allowing the API layer to remain responsive while background workers process asynchronous tasks.
 
+[Database-repo](https://github.com/avisheksharmacoder/lorealdb)
+
 [Frontend-repo](https://github.com/avisheksharmacoder/agent-platform-frontend)
 
 ## Project Status
@@ -64,7 +66,7 @@ The chatbot architecture includes:
 
 ### Database
 
-* **LorealDB** — Custom local database engine
+* **LorealDB** — Custom Rust native local database engine
 * **AsyncDBEngine** — Asynchronous interface for database operations
 * **AsyncQueueDBEngine** — Database-backed queue interface
 
@@ -131,7 +133,7 @@ At a high level, the system consists of three primary layers:
 └─────────────────────────────┘
 ```
 
-The key architectural principle is that **long-running AI processing does not need to remain inside the user's HTTP request path**.
+The key architectural principle is that **User creates a ticket, AI Agent assigns it to a support agent.**.
 
 ---
 
@@ -221,7 +223,7 @@ Technical Support
 
 ### 6. Ticket Update
 
-After successful processing, the worker updates the ticket with the AI-generated information and support-agent assignment.
+Once the ticket is resolved, the worker updates the ticket with the AI-generated information and support-agent assignment.
 
 The administrative dashboard can then display the processed ticket.
 
@@ -546,4 +548,4 @@ Tense is being developed around a simple principle:
 
 The project also treats AI behavior as an engineering problem rather than simply an API integration. Model outputs are structured and validated, retrieval and context construction are explicit parts of the architecture, and response quality can be evaluated against future changes.
 
-The result is intended to be a practical exploration of building **AI-enabled systems rather than simply applications that call an LLM API**.
+The result is intended to be a practical exploration of building **AI-enabled systems.**.
