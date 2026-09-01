@@ -14,22 +14,17 @@ from src.v1.models import (
     UserChatMessage, 
     AIChatMessage, 
     Role, 
-    AIChatFinalResponse, 
-    AIUserChatResponse, 
-    AIUserChatTicketEscalation
+    AIChatFinalResponse
 )
-from src.v1.agent import chat_agent, ChatDependencies
+from src.v1.agent import classifier_agent, chat_worker, ticket_worker, ActionType
 
 class QueryRequest(BaseModel):
     messages: list[UserChatMessage | AIChatMessage]
 
 
-@nemotron_router.post("/generate", response_model=AIChatFinalResponse)
+@nemotron_router.post("/generate", response_model=AIChatMessage)
 async def generate_nemotron_response(prompt: QueryRequest, request: Request):
     try:
-        # Extract the vector database from app state
-        vector_db = request.app.state.vector_db
-
         # We pass the conversation as a formatted string to the agent
         history_str = "CHAT HISTORY:\n"
         for msg in prompt.messages[:-1]:
@@ -41,52 +36,43 @@ async def generate_nemotron_response(prompt: QueryRequest, request: Request):
             history_str += prompt.messages[-1].content
             
         # Run the agent
-        deps = ChatDependencies(vector_db=vector_db)
         print("1. Request received", flush=True)
-        result = await chat_agent.run(
-            history_str, 
-            deps=deps,
-            model_settings={'max_tokens': 4096}
-        )
-        print("2. Agent completed", flush=True)
-        print(type(result.output))
-        print(result.output)
-        print(result.output.content)
         
-        # We get the usage from pydantic-ai's result
-        usage = result.usage
-        total_tokens = (usage.total_tokens if usage.total_tokens is not None else 0) if usage else 0
-        print(f"3. Usage obtained: {total_tokens} tokens", flush=True)
+        # Step 1: Classify
+        classification = await classifier_agent.run(history_str)
+        action = classification.output
+        print(f"2. Classification completed: {action}", flush=True)
         
-        # Extract RAG documents from dependencies
-        rag_docs = deps.rag_docs
-                    
-        # Map flat AgentOutput to the actual AIChatFinalResponse models
-        output_data = result.output
-        print(f"4. Output action: {output_data.action}", flush=True)
+        from src.v1.models import AITicketDraft, AIChatMessage
         
-        if output_data.action == "respond":
-            # Sanitize curly braces to prevent frontend template engine crashes
-            safe_content = output_data.content.replace("{", "&#123;").replace("}", "&#125;")
-            final_response = AIUserChatResponse(
-                reasoning_trace="",
-                message=AIChatMessage(
-                    role=Role.AI,
-                    content=safe_content,
-                    tokens=total_tokens,
-                    sources=rag_docs
-                )
+        # Step 2: Route to specific worker
+        if action == ActionType.CHAT:
+            result = await chat_worker.run(history_str, model_settings={"max_tokens": 4096})
+            output_data = result.output  # This is just a string!
+            print(f"3. Chat worker completed", flush=True)
+            
+            # Since it is native text, there is no JSON formatting bug
+            safe_content = output_data.replace("{", "&#123;").replace("}", "&#125;")
+            final_response = AIChatMessage(
+                role=Role.AI,
+                content=safe_content,
+                tokens=result.usage.total_tokens if result.usage else 0
+            )
+            
+        elif action == ActionType.TICKET:
+            result = await ticket_worker.run(history_str, model_settings={"max_tokens": 4096})
+            output_data = result.output  # This is an AITicketDraft
+            print(f"3. Ticket worker completed", flush=True)
+            
+            safe_description = output_data.description.replace("{", "&#123;").replace("}", "&#125;")
+            output_data.description = safe_description
+            final_response = AIChatMessage(
+                role=Role.AI,
+                content=output_data.model_dump_json(),
+                tokens=result.usage.total_tokens if result.usage else 0
             )
         else:
-            safe_description = output_data.description.replace("{", "&#123;").replace("}", "&#125;")
-            final_response = AIUserChatTicketEscalation(
-                reasoning_trace="",
-                title=output_data.title,
-                description=safe_description,
-                priority=output_data.priority,
-                tags=output_data.tags,
-                sources=rag_docs
-            )
+            raise ValueError(f"Unknown action type: {action}")
             
         return final_response
     except Exception as e:
