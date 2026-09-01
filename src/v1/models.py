@@ -242,39 +242,32 @@ class UserChatMessage(BaseModel):
     tokens: int = Field(default=0, description="tokens in the message")
 
 
-# AI agent message model. 
+class AIResponseDraft(BaseModel):
+    role: Role = Field(default=Role.AI, description="role of the party who sent the message")
+    content: str = Field(description="content of the message")
+
+class AITicketDraft(BaseModel):
+    title: str = Field(default="", description="Title of the ticket")
+    description: str = Field(default="", description="Description of the ticket")
+    priority: Priority = Field(default=Priority.MEDIUM, description="Priority of the ticket")
+    tags: list[str] = Field(default_factory=list, description="List of tags for the ticket for keyword search")
+
+
+AIChatFinalResponse = Union[AIResponseDraft, AITicketDraft]
+
+
+
 class AIChatMessage(BaseModel):
     role: Role = Field(default=Role.AI, description="role of the party who sent the message")
     content: str = Field(description="content of the message")
     timestamp: datetime = Field(default_factory=datetime.now)
     tokens: int = Field(default=0, description="tokens in the message")
     quality: Quality | None = Field(default=None, description="quality of the response")
-    sources: RAGDocumentSourceOut | None = Field(default=None, description="documents fetched from rag db")
     response_summary: str | None = Field(default="", description="summary of the response for context window slimming")
 
-# Models for Chatbot and user interactions. 
-# we use 2 models for 2 different response design. 
-# if the user calls for a ticket, we return AIUserChatTicketEscalation else
-# we return the normal AIUserChatResponse. 
-class AgentResponse(BaseModel):
-    action: Literal["respond"] = "respond"
-    reasoning_trace: str = Field(description="Step-by-step reasoning on why to respond normally.")
-    message: AIChatMessage
 
-class AgentEscalate(BaseModel):
-    action: Literal["escalate"] = "escalate"
-    reasoning_trace: str = Field(description="Step-by-step reasoning on why to escalate and create a ticket.")
-    title: str = Field(max_length=100, description="Title of the ticket")
-    description: str = Field(max_length=1000, description="Description of the ticket")
-    priority: Priority = Field(description="Priority of the ticket")
-    tags: list[str] | None = Field(default=None, description="Tags of the ticket")
-    sources: RAGDocumentSourceOut | None = Field(default=None, description="documents fetched from rag db")
 
-# Pydantic uses the correct model from the response returned. 
-AIChatFinalResponse = Annotated[
-    Union[AgentResponse, AgentEscalate],
-    Field(discriminator="action"),
-]
+
 
 # user chat session model. 
 class UserAIChatSession(BaseModel):
