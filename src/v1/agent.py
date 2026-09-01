@@ -6,18 +6,10 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from src.v1.models import AIChatFinalResponse, RAGDocumentSourceOut, RAGDocumentSource
+from src.v1.models import AIResponseDraft, AITicketDraft
 from typing import Annotated, Literal, Union, Any
-from dataclasses import dataclass
-from pydantic_ai import RunContext
-from src.v1.embedding_router import generate_embedding, EmbeddingRequest
 
 load_dotenv()
-
-@dataclass
-class ChatDependencies:
-    vector_db: Any
-    rag_docs: Any = None
 
 
 class TicketResolution(BaseModel):
@@ -34,6 +26,9 @@ nvidia_client = AsyncOpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.getenv("NVIDIA_API_KEY"),
 )
+
+MODEL1 = "nvidia/nemotron-3.5-lightning-30b-a3b"
+MODEL2 = "nvidia/nemotron-3-ultra-550b-a55b"
 
 # --- PATCH FOR NEMOTRON 120B TOOL CALLING BUG ---
 import json
@@ -114,6 +109,32 @@ async def patched_create(*args, **kwargs):
             except Exception as e:
                 print(f"Nemotron patch failed to parse JSON: {e}")
                 
+        # Merge fragmented tool calls from Nemotron
+        if getattr(msg, "tool_calls", None) and len(msg.tool_calls) > 1:
+            first_name = msg.tool_calls[0].function.name
+            if all(tc.function.name == first_name for tc in msg.tool_calls):
+                merged_args = {}
+                for tc in msg.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        for k, v in args.items():
+                            if k in merged_args and isinstance(merged_args[k], str) and isinstance(v, str):
+                                merged_args[k] += "\n" + v
+                            else:
+                                merged_args[k] = v
+                    except Exception:
+                        pass
+                msg.tool_calls = [
+                    ChatCompletionMessageToolCall(
+                        id=msg.tool_calls[0].id,
+                        type="function",
+                        function=Function(
+                            name=first_name,
+                            arguments=json.dumps(merged_args)
+                        )
+                    )
+                ]
+                
     return response
 
 nvidia_client.chat.completions.create = patched_create
@@ -121,7 +142,7 @@ nvidia_client.chat.completions.create = patched_create
 
 # 2. Pass the custom client to OpenAIModel
 nemotron_model = OpenAIChatModel(
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    MODEL1,
     provider=OpenAIProvider(openai_client=nvidia_client),
 )
 
@@ -140,90 +161,36 @@ routing_agent = Agent(
 
 
 
-# Flat models to avoid Nvidia grammar $defs bug
-class AgentRespond(BaseModel):
-    action: Literal["respond"] = "respond"
-    content: str = Field(description="The final message content to show to the user")
+from enum import Enum
 
-class AgentEscalate(BaseModel):
-    action: Literal["escalate"] = "escalate"
-    title: str = Field(max_length=100, description="Title of the ticket")
-    description: str = Field(max_length=1000, description="Description of the ticket")
-    priority: Literal["low", "medium", "high", "critical"] = Field(description="Priority of the ticket")
-    tags: list[str] | None = Field(default=None, description="Tags of the ticket")
+class ActionType(str, Enum):
+    CHAT = "chat"
+    TICKET = "ticket"
 
-AgentOutput = Annotated[Union[AgentRespond, AgentEscalate], Field(discriminator="action")]
-
-chat_agent = Agent(
+classifier_agent = Agent(
     nemotron_model,
-    deps_type=ChatDependencies,
-    output_type=AgentOutput,
+    output_type=ActionType,
     system_prompt=(
-        """
-        You are an IT support assistant.
-
-        Determine the appropriate action:
-
-        1. General queries:
-        Use `respond` directly. Do not search the knowledge base.
-
-        2. IT/support problems:
-        Use `search_knowledge_base` to look for relevant previous resolutions.
-
-        3. If the knowledge base contains a relevant resolution:
-        Use `respond` and provide the complete useful resolution to the user.
-
-        4. If the knowledge base does not contain a relevant resolution:
-        Use `respond` with the best answer you can provide.
-
-        5. If the user explicitly asks to create/escalate a support ticket:
-        Use `escalate`.
-
-        For `respond`, put the complete user-facing answer in `content`.
-        For `escalate`, provide the required ticket fields.
-
-        Never expose internal reasoning or tool-selection logic to the user.
-        """
-    ),
+        "Analyze the user request.\n"
+        "If they explicitly want to create or escalate a support ticket, return \"ticket\".\n"
+        "For all other IT queries, explanations, or code requests, return \"chat\"."
+    )
 )
 
-@chat_agent.tool
-async def search_knowledge_base(ctx: RunContext[ChatDependencies], problem_description: str) -> str:
-    """
-    Search the knowledge base for existing tickets and resolutions that match the problem description.
-    Use this to find a solution before escalating to a new ticket.
-    """
-    # 1. Generate the embedding natively using the existing router's logic
-    request = EmbeddingRequest(prompt=problem_description)
-    embedding_response = await generate_embedding(request)
-    embedding_vector = embedding_response["embedding"]
-    
-    # 2. Search the vector database
-    results = ctx.deps.vector_db.search_similar_documents(
-        query_embedding=embedding_vector, 
-        limit=3
+chat_worker = Agent(
+    nemotron_model,
+    system_prompt=(
+        "You are an IT support assistant.\n"
+        "Respond to the user with the solution they are asking for so they can get back to work.\n"
+        "Provide code snippets natively in markdown if needed. Do not mention tickets."
     )
-    
-    # 3. Map the raw dictionary results to the expected Pydantic models
-    documents = [
-        RAGDocumentSource(
-            doc_id=res.get("doc_id", ""),
-            doc_title=res.get("doc_title", ""),
-            doc_content=res.get("doc_content", ""),
-            doc_embedding=res.get("doc_embedding")
-        )
-        for res in results
-    ]
-    
-    # Save structured data to dependencies for the frontend
-    ctx.deps.rag_docs = RAGDocumentSourceOut(documents=documents)
-    
-    # Return formatted plain text to avoid LLM JSON grammar confusion
-    if not documents:
-        return "No relevant documents found."
-    
-    text_results = []
-    for doc in documents:
-        text_results.append(f"Title: {doc.doc_title}\nContent: {doc.doc_content}")
-    
-    return "\n\n---\n\n".join(text_results)
+)
+
+ticket_worker = Agent(
+    nemotron_model,
+    output_type=AITicketDraft,
+    system_prompt=(
+        "You are an IT ticket extraction agent.\n"
+        "Extract the required ticket fields (title, description, priority, tags) from the user request."
+    )
+)
